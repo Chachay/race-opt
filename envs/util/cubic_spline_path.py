@@ -31,7 +31,7 @@ class CubicSplinePath:
         ddx, ddy   = self.ddX(s), self.ddY(s)
         return (ddy * dx - ddx * dy) / ((dx ** 2 + dy ** 2)**(3 / 2))
 
-    def __find_nearest_point(self, s0, x, y):
+    def find_nearest_point(self, s0, x, y):
         def calc_distance(_s, *args):
             _x, _y= self.X(_s), self.Y(_s)
             return (_x - args[0])**2 + (_y - args[1])**2

@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from typing import Optional
 import time
 
@@ -9,13 +10,13 @@ import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
 
-from util.cubic_spline_path import CubicSplinePath
-from util.sim_model import VehicleSimModel
+from envs.util.cubic_spline_path import CubicSplinePath
+from envs.util.sim_model import VehicleSimModel
 
 def wrap_angle(angle):
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
-base_path = "./core/params/"
+base_path = Path(__file__).resolve().parent.parent / "core" / "params"
 def load_param(file_name):
   with open(os.path.join(base_path, file_name + ".json")) as json_file:
     return json.load(json_file)
@@ -39,8 +40,8 @@ class TrackView:
     s = self.wrap_s(s_array)
     x = self.path.X(s)
     y = self.path.Y(s)
-    yaw = self.path.calc_yaw(s)          # vectorized
-    kappa = self.path.calc_curvature(s)  # vectorized
+    yaw = self.path.calc_yaw(s)
+    kappa = self.path.calc_curvature(s)
 
     tx = np.cos(yaw)
     ty = np.sin(yaw)
@@ -107,6 +108,11 @@ class TrackView:
 class RacingEnvBase(gym.Env):
   """Custom Environment that follows gymnasium interface"""
   metadata = {'render_modes': ['human', 'telemetry', 'rgb_array', 'matplotlib'],'render_fps': 25}
+  SPEC_VERSION = "1.0.0"
+  PHYSICS_ID = "sim_model:v1"
+
+  OBS_SCHEMA = ["x", "y", "yaw", "vx", "vy", "yaw_rate", "progress"]
+  ACT_SCHEMA = ["throttle", "steer"]
 
   def __init__(
     self,
@@ -135,7 +141,7 @@ class RacingEnvBase(gym.Env):
     self.dt = float(dt)
     self.v = VehicleSimModel(scale=2, control_dt = dt, sim_dt= dt/10)
 
-    # Simple 2d continuous action: [steer, throttle]
+    # Simple 2d continuous action: [throttle, steer]
     self.action_space = spaces.Box(low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]), dtype=np.float32)
 
     # Observation: [x, y, vx, vy, progress]
@@ -168,17 +174,17 @@ class RacingEnvBase(gym.Env):
   def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
     super().reset(seed=seed)
 
-    ### Initial Vehicle state [X, Y, phi]
+    ### Initial Vehicle state [X, Y, phi] in world coordinates
     phi0 = np.arctan2(self.path.dY(0), self.path.dX(0))
     self.v.x   = np.array([self.path.X(0), self.path.Y(0), phi0],
                     dtype=np.float64)
-    ### Initial Vehicle state [vx, vy, r]
+    ### Initial Vehicle state [vx, vy, yaw rate] in vehicle coordinates
     self.v.dq  = np.array([1.0, 0., 0.],
                     dtype=np.float64)
 
     self._state = {
-      "pos": np.array([self.v.x[0], self.v.x[1]], dtype=np.float32),
-      "vel": np.array([self.v.dq[0], self.v.dq[1]], dtype=np.float32),
+      "pos": np.array([self.v.x[0], self.v.x[1], self.v.x[2]], dtype=np.float32),
+      "vel": np.array([self.v.dq[0], self.v.dq[1], self.v.dq[2]], dtype=np.float32),
       "progress": 0.0,
       "lap": 0,
     }
@@ -188,6 +194,7 @@ class RacingEnvBase(gym.Env):
 
     obs = self._make_obs(self._state)
     info = self._make_info(self._state)
+    info["env_spec"] = self.get_env_spec()
 
     if self.enable_record:
       self._record_reset(obs, info)
@@ -206,8 +213,8 @@ class RacingEnvBase(gym.Env):
     self.v.sim_step(u)
     self._t += self.dt
 
-    self._state["pos"] = np.array([self.v.x[0], self.v.x[1]], dtype=np.float32)
-    self._state["vel"] = np.array([self.v.dq[0], self.v.dq[1]], dtype=np.float32)
+    self._state["pos"] = np.array([self.v.x[0], self.v.x[1], self.v.x[2]], dtype=np.float32)
+    self._state["vel"] = np.array([self.v.dq[0], self.v.dq[1], self.v.dq[2]], dtype=np.float32)
 
     # compute derived quantities
     f = self._track_view.frenet_errors(self.v.x[0], self.v.x[1], self.v.x[2], self._last_s)
@@ -222,6 +229,8 @@ class RacingEnvBase(gym.Env):
       "track_error": float(self._state["e_y"]),
       "fail_event": fail_event,
       "lap_complete": lap_complete,
+      "lap": int(self._state.get("lap", 0)),
+      "time": float(self._t),
       "terminated": terminated,
       "truncated": truncated,
     }
@@ -257,7 +266,7 @@ class RacingEnvBase(gym.Env):
     pos = state["pos"]
     vel = state["vel"]
     progress = state.get("progress", 0.0)
-    return np.array([pos[0], pos[1], vel[0], vel[1], progress], dtype=np.float32)
+    return np.array([pos[0], pos[1], pos[2], vel[0], vel[1], vel[2], progress], dtype=np.float32)
 
   def _make_info(self, state):
     return {
@@ -267,19 +276,23 @@ class RacingEnvBase(gym.Env):
     }
 
   def _make_reward_and_events(self, state, action=None):
-    # reward is delta progress since last step, penalize going off track (big dist from path)
-    progress = state["progress"]
-    delta = progress - self._last_progress
-    if self._track_view.close:
-      delta = (delta + 1.0) % 1.0
-
-    self._last_progress = progress
-    reward = delta * 10.0  # scale
-
     fail_event = None
     lap_complete = False
     terminated = False
     truncated = False
+
+    # reward is delta progress since last step, penalize going off track (big dist from path)
+    progress = state["progress"]
+    delta = progress - self._last_progress
+    if self._track_view.close:
+      # Check for lap completion
+      if delta < 0.0 and progress < 0.1 and self._last_progress > 0.9:
+        lap_complete = True
+      delta = (delta + 1.0) % 1.0
+    elif progress >= 1.0 and self._last_progress < 1.0:
+      lap_complete = True
+
+    reward = delta * 10.0  # scale
 
     # Off-track detection: if path provided and distance is large
     if self.path is not None:
@@ -294,10 +307,11 @@ class RacingEnvBase(gym.Env):
       truncated = True
 
     # lap detection (progress wrapped around)
-    if progress >= 0.999 and state.get("lap", 0) == 0:
-      lap_complete = True
+    if lap_complete and state.get("lap", 0) == 0:
       state["lap"] = state.get("lap", 0) + 1
       reward += 100.0
+
+    self._last_progress = progress
 
     return float(reward), fail_event, bool(terminated), bool(truncated), bool(lap_complete)
 
@@ -339,7 +353,7 @@ class RacingEnvBase(gym.Env):
       # streaming is optional; swallow errors
       pass
 
-  # ---- Rendering implementations (lightweight) ----
+  # ---- Rendering implementations ----
   def _render_rgb(self, render_cfg=None):
     # produce a small HxW x 3 uint8 array with a dot representing the agent
     H, W = 240, 320
@@ -368,7 +382,7 @@ class RacingEnvBase(gym.Env):
   def _render_human(self, render_cfg=None):
     # Default: print simple telemetry to stdout (useful during local development)
     tel = self._render_telemetry(render_cfg)
-    print(f"[RacingEnv] t={tel['time']:.2f} progress={tel['progress']:.3f} pos={tel['pos']} vel={tel['vel']}")
+    print(f"[RacingEnv] t={tel['time']:.2f} progress={tel['progress']:.3f} pos={[f'{x:.3f}' for x in tel['pos']]} vel={[f'{x:.3f}' for x in tel['vel']]}")
 
   def _render_matplotlib(self, render_cfg=None):
     import matplotlib.pyplot as plt
@@ -392,15 +406,22 @@ class RacingEnvBase(gym.Env):
     self._fig.canvas.draw()
     self._fig.canvas.flush_events()
 
+  def get_env_spec(self) -> dict:
+    return {
+        "spec_version": self.SPEC_VERSION,
+        "physics_id": self.PHYSICS_ID,
+        "obs": self.OBS_SCHEMA,
+        "action": self.ACT_SCHEMA,
+    }
+
 if __name__ == "__main__":
   env = RacingEnvBase()
 
   obs, info = env.reset()
   for i in range(100):
-    obs, reward, terminated, truncated, info = env.step([0.01, 0.0])
+    obs, reward, terminated, truncated, info = env.step([0.02, 0.0])
     env.render(mode="matplotlib")
-    env.render(mode='human')
+    env.render(mode="human")
 
     if terminated or truncated:
       obs, info = env.reset()
-

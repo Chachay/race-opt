@@ -307,7 +307,7 @@ class RacingEnvBase(gym.Env):
       truncated = True
 
     # lap detection (progress wrapped around)
-    if lap_complete and state.get("lap", 0) == 0:
+    if lap_complete:
       state["lap"] = state.get("lap", 0) + 1
       reward += 100.0
 

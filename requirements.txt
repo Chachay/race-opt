@@ -1,0 +1,5 @@
+numpy>=2.4
+scipy>=1.16
+pandas>=2.2
+gymnasium>=0.28
+matplotlib>=3.10

@@ -7,11 +7,12 @@ Built upon and significantly extending ideas from alexliniger/gym-racecar, with 
 
 ## Quick start
 
-### Run baseline (Pure Pursuit)
+### Run Samples
 ```
 python examples/run_baseline.py --render matplotlib
+python examples/run_mpc.py --render matplotlib
+python tools/tune_pure_pursuit_optuna.py
 ```
-
 ## Dependencies
 This repository currently includes:
 - Environment (envs/) and Pure Pursuit baseline agent (agents/pure_pursuit/)

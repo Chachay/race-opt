@@ -42,7 +42,7 @@ class MPCCConfig:
   delta_max: float = 0.6
   throttle_min: float = -1.0
   throttle_max: float = 1.0
-  sdot_min: float = -3.0
+  sdot_min: float = 0.0
   sdot_max: float = 6.0
 
   # weights
@@ -265,7 +265,8 @@ class CasadiMPCC:
 
     # vx >= 0
     for k in range(N + 1):
-      lbz[7 * k + 3] = 0.0
+      #lbz[7 * k + 3] = 0.0
+      lbz[7 * k + 3] = vx_zero
 
     # input bounds
     nX = self._nX
@@ -332,7 +333,10 @@ class CasadiMPCC:
     """
     N = self.cfg.N
     dt = float(self.cfg.dt)
-    tr = float(self.p.get("s_trust_region", 0.2))
+    tr = float(self.p.get("s_trust_region", 0.1))
+
+    x0 = x0.copy()
+    x0[3] = max(x0[3], 0.3) #vx_zero)  # vx >= vx_zero
 
     s0 = float(x0[6])
 

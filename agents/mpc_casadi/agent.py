@@ -71,16 +71,16 @@ class BicycleMPCConfig:
   throttle_max: float = 1.0
 
   # reference speed (m/s)
-  v_ref: float = 4.0
+  v_ref: float = 2.0
 
   # cost weights
-  q_pos: float = 6.0    # position tracking (x,y)
-  q_yaw: float = 2.0    # heading tracking
+  q_pos: float = 2.0    # position tracking (x,y)
+  q_yaw: float = 3.0    # heading tracking
   q_vx: float = 0.5     # vx tracking
   r_throttle: float = 0.05
   r_delta: float = 0.10
   r_dthrottle: float = 0.20
-  r_ddelta: float = 0.50
+  r_ddelta: float = 3.30
 
   # solver options
   ipopt_max_iter: int = 80
@@ -185,15 +185,15 @@ class CasadiBicycleMPC:
       alpha_r = smooth_clip(alpha_r, -maxAlpha, maxAlpha)
 
       # lateral forces
-      Fyf = tire_force_lat(alpha_f, Bf, Cf, Df)
-      Fyr = tire_force_lat(alpha_r, Br, Cr, Dr)
+      Fyf = - tire_force_lat(alpha_f, Bf, Cf, Df)
+      Fyr = - tire_force_lat(alpha_r, Br, Cr, Dr)
 
       # longitudinal force (rear drive + rolling resistance)
       # sign(vx) for resistance: use tanh smoothing
+      vx_eff = ca.fmax(ca.fabs(vx), vx_zero)
       sign_v = ca.tanh(20.0 * vx)
-      Fx_drive = (Cm1 - Cm2 * vx_eff) * thr
-      Fx_res = (Cr0 + Cr2 * vx_eff * vx_eff) * sign_v
-      Fx = Fx_drive - Fx_res
+      Fx = (Cm1 * thr) - (Cm2 * thr * vx_eff) - (Cr0 * sign_v) - (Cr2 * vx_eff * vx_eff)
+
 
       # dynamics in body frame
       vx_dot = (Fx - Fyf * ca.sin(delta) + m * vy * rr) / m
@@ -440,7 +440,7 @@ if __name__ == "__main__":
   from envs.race_env import RacingEnvBase
 
   env = RacingEnvBase()
-  agent = CasadiBicycleMPCAgent(DEFAULT_PARAMS, BicycleMPCConfig(N=20, dt=0.05, v_ref=4.0))
+  agent = CasadiBicycleMPCAgent(DEFAULT_PARAMS, BicycleMPCConfig(N=20, dt=0.05, v_ref=1.9))
   obs, info = env.reset()
   agent.reset(env, obs, info)
 

@@ -18,18 +18,18 @@ This repository currently includes:
 - Optional MPC solvers (OSQP / CasADi) may be added later
 - acados-based MPC/MPCC is not included yet
 
-## Minimal requirements
+### Minimal requirements
 - Python 3.10+ (recommended)
 - NumPy
 - Gymnasium
 - Matplotlib (only needed for --render matplotlib)
 
-## Optional
+### Optional
 - Optuna (for a parameter tuning)
 - OSQP + SciPy (for QP-based MPC if/when enabled)
 - CasADi (for nonlinear MPC if/when enabled)
 
-# Implemented agents
+## Implemented agents
 
 | # | Algorithm | Lap time |
 | -|-|-|

@@ -23,8 +23,16 @@ This repository currently includes:
 - Matplotlib (only needed for --render matplotlib)
 
 ## Optional
+- Optuna (for a parameter tuning)
 - OSQP + SciPy (for QP-based MPC if/when enabled)
 - CasADi (for nonlinear MPC if/when enabled)
+
+# Implemented agents
+
+| # | Algorithm | Lap time |
+| -|-|-|
+| 1 | Pure pursuite | 11.80 s |
+| 2 | MPC(LQR) | 14.15 s |
 
 ## Lineage and Acknowledgements
 race-opt is heavily inspired by the pioneering work of Alexander Liniger to the gym-racecar project.

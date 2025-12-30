@@ -2,7 +2,7 @@
 # CasADi nonlinear MPC (dynamic bicycle model w/ simple motor + Pacejka-like lateral tires)
 #
 # Assumptions:
-# - env obs: [x, y, yaw, vx, progress]  (vx = longitudinal speed in body frame)
+# - env obs: [x, y, yaw, vx, vy, rr, progress]  (vx = longitudinal speed in body frame)
 #   If your obs differs, adjust unpacking in act().
 # - env provides track_view() with:
 #   - L (track length)
@@ -14,8 +14,10 @@
 #   pip install casadi
 #
 from dataclasses import dataclass
+import json
 import math
 from typing import Dict, Any, Optional, Tuple
+from pathlib import Path
 
 import numpy as np
 
@@ -24,36 +26,10 @@ try:
 except Exception:
   ca = None
 
-
-DEFAULT_PARAMS = {
-  "Cm1": 0.287,
-  "Cm2": 0.0545,
-  "Cr0": 0.0518,
-  "Cr2": 0.00035,
-  "Br": 3.3852,
-  "Cr": 1.2691,
-  "Dr": 0.1737,
-  "Bf": 2.579,
-  "Cf": 1.2,
-  "Df": 0.192,
-  "m": 0.041,
-  "Iz": 27.8e-6,
-  "lf": 0.029,
-  "lr": 0.033,
-  "car_l": 0.06,
-  "car_w": 0.03,
-  "g": 9.81,
-  "R_in": 0.14,
-  "R_out": 0.14,
-  "max_dist_proj": 0.2,
-  "E_long": 0.9,
-  "E_eps": 0.95,
-  "maxAlpha": 0.6,
-  "initial_velocity": 1.0,
-  "s_trust_region": 0.2,
-  "vx_zero": 0.3,
-}
-
+base_path = Path(__file__).resolve().parent.parent.parent / "core" / "params"
+def load_param(file_name):
+  with open(os.path.join(base_path, file_name + ".json")) as json_file:
+    return json.load(json_file)
 
 def wrap_to_pi(a: float) -> float:
   return (a + math.pi) % (2.0 * math.pi) - math.pi
@@ -109,7 +85,7 @@ class CasadiBicycleMPC:
   def __init__(self, params: Dict[str, float], cfg: BicycleMPCConfig):
     if ca is None:
       raise RuntimeError("CasADi is not available. Install with: pip install casadi")
-    self.p = dict(params)
+    self.p = load_param("model")
     self.cfg = cfg
 
     self._solver = None
@@ -376,7 +352,8 @@ class CasadiBicycleMPCAgent:
   def __init__(self, params: Dict[str, float] = None, cfg: BicycleMPCConfig = None):
     if ca is None:
       raise RuntimeError("CasADi is not available. Install with: pip install casadi")
-    self.params = dict(DEFAULT_PARAMS if params is None else params)
+
+    self.params = load_param("model") if params is None else dict(params)
     self.cfg = BicycleMPCConfig() if cfg is None else cfg
 
     self._tv = None
@@ -387,7 +364,7 @@ class CasadiBicycleMPCAgent:
     self._tv = env.track_view()
     self._L = float(self._tv.L)
 
-  def _build_reference(self, progress: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+  def _build_reference(self, vx: float, progress: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     N = self.cfg.N
     dt = float(self.cfg.dt)
     v_ref = float(self.cfg.v_ref)
@@ -401,7 +378,7 @@ class CasadiBicycleMPCAgent:
     vx_ref = np.full(N + 1, v_ref, dtype=float)
 
     for k in range(N + 1):
-      sk = float(self._tv.wrap_s(s0 + v_ref * k * dt))
+      sk = float(self._tv.wrap_s(s0 + vx * k * dt))
       c = self._tv.sample_center(sk)
       x_ref[k] = float(np.asarray(c["x"]))
       y_ref[k] = float(np.asarray(c["y"]))
@@ -417,7 +394,7 @@ class CasadiBicycleMPCAgent:
     x, y, yaw, vx, vy, r, progress = map(float, obs)
 
     # Build reference
-    ref = self._build_reference(progress)
+    ref = self._build_reference(vx, progress)
 
     # Solve MPC for [throttle, delta(rad)]
     x0 = np.array([x, y, yaw, vx, vy, r], dtype=float)
@@ -438,15 +415,27 @@ if __name__ == "__main__":
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
   from envs.race_env import RacingEnvBase
+  from tools.runner import run_episode, RunConfig
 
   env = RacingEnvBase()
-  agent = CasadiBicycleMPCAgent(DEFAULT_PARAMS, BicycleMPCConfig(N=20, dt=0.05, v_ref=1.9))
-  obs, info = env.reset()
-  agent.reset(env, obs, info)
+  agent = CasadiBicycleMPCAgent(None, BicycleMPCConfig(N=20, dt=0.05, v_ref=2.0))
 
-  for _ in range(8000):
-      action = agent.act(env, obs, info)
-      obs, reward, terminated, truncated, info = env.step(action)
-      env.render("matplotlib")
-      if terminated or truncated:
-          break
+  metrics = run_episode(env, agent, RunConfig(
+    max_steps=3000,
+    max_laps=5,
+    render="matplotlib",
+    seed=0,
+    reset_on_done=False,
+  ))
+
+  if metrics.get("track_length") is not None:
+    print(f"track_length: {metrics['track_length']:.3f} m")
+  if metrics["lap_times"]:
+    for i, lt in enumerate(metrics["lap_times"], start=1):
+      print(f"lap {i}: {lt:.3f} s (sim time)")
+    print(f"best_lap: {metrics['best_lap_time']:.3f} s")
+  else:
+    print("no lap completed")
+  print(f"steps={metrics['steps']} total_reward={metrics['total_reward']:.3f}")
+
+  env.close()

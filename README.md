@@ -36,6 +36,7 @@ This repository currently includes:
 | -|-|-|
 | 1 | Pure pursuite | 11.80 s |
 | 2 | Minimal MPC(LQR) | 14.15 s |
+| 3 | CasADi MPC | 11.05 s |
 
 ## Lineage and Acknowledgements
 race-opt is heavily inspired by the pioneering work of Alexander Liniger to the gym-racecar project.

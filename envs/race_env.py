@@ -390,6 +390,7 @@ class RacingEnvBase(gym.Env):
     if self._fig is None:
         plt.ion()
         self._fig, self._ax = plt.subplots()
+        self._ax.set_aspect('equal')
         plt.show(block=False)
     ax = self._ax
     ax.cla()

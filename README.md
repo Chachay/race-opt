@@ -3,6 +3,8 @@
 A research framework for autonomous racing focused on optimal control and reinforcement learning.
 Built upon and significantly extending ideas from alexliniger/gym-racecar, with modern Gymnasium support, reproducible benchmarking, and real-time telemetry.
 
+![animation](assets/demo.gif)
+
 ## Quick start
 
 ### Run baseline (Pure Pursuit)
@@ -32,7 +34,7 @@ This repository currently includes:
 | # | Algorithm | Lap time |
 | -|-|-|
 | 1 | Pure pursuite | 11.80 s |
-| 2 | MPC(LQR) | 14.15 s |
+| 2 | Minimal MPC(LQR) | 14.15 s |
 
 ## Lineage and Acknowledgements
 race-opt is heavily inspired by the pioneering work of Alexander Liniger to the gym-racecar project.

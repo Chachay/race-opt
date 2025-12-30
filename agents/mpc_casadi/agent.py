@@ -1,4 +1,3 @@
-# agents/mpc/casadi_bicycle_agent.py
 # CasADi nonlinear MPC (dynamic bicycle model w/ simple motor + Pacejka-like lateral tires)
 #
 # Assumptions:
@@ -85,7 +84,7 @@ class CasadiBicycleMPC:
   def __init__(self, params: Dict[str, float], cfg: BicycleMPCConfig):
     if ca is None:
       raise RuntimeError("CasADi is not available. Install with: pip install casadi")
-    self.p = load_param("model")
+    self.p = load_param("model") if params is None else dict(params)
     self.cfg = cfg
 
     self._solver = None

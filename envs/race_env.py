@@ -117,8 +117,8 @@ class RacingEnvBase(gym.Env):
   def __init__(
     self,
     path: Optional[CubicSplinePath] = None,
-    wL: float = 0.0,
-    wR: float = 0.0,
+    wL: float = 0.14,
+    wR: float = 0.14,
     close: bool = True,
 
     dt: float = 0.05,
@@ -297,7 +297,7 @@ class RacingEnvBase(gym.Env):
     # Off-track detection: if path provided and distance is large
     if self.path is not None:
       min_d = float(np.abs(state.get("e_y", 0.0)))
-      if min_d > 5.0:
+      if min_d > 0.14:
         fail_event = "off_track"
         terminated = True
         reward -= 10.0

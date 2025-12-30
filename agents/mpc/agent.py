@@ -30,7 +30,7 @@ class MPCAgent:
   """
   Minimal lateral MPC (linearized error dynamics) + simple speed P controller.
 
-  - Uses TrackView only: env.track_view().wrap_s(), sample_center(s)
+  - Uses TrackView only: env.track_view(), sample_center(s)
   - Does NOT access env.path or env.v internals.
   - obs expected: [x, y, yaw, v, progress]
   - action output: [throttle, steer] in [-1, 1]
@@ -58,7 +58,7 @@ class MPCAgent:
 
     # reference rollout (centerline) along s
     s0 = float(progress) * self._L
-    s0 = float(self._tv.wrap_s(s0 + self.cfg.lookahead_s))
+    s0 = float(s0 + self.cfg.lookahead_s)
 
     # build per-step feedforward steering from curvature: delta_ff ~ atan(L * kappa)
     kappa = np.zeros(self.cfg.horizon, dtype=float)
@@ -68,7 +68,7 @@ class MPCAgent:
     v_ref = float(self.cfg.v_ref)
 
     for k in range(self.cfg.horizon):
-      sk = float(self._tv.wrap_s(s0 + v_ref * k * self._dt))
+      sk = float(s0 + v_ref * k * self._dt)
       c = self._tv.sample_center(sk)
       kk = float(np.asarray(c["kappa"]))
       kappa[k] = kk

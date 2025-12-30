@@ -5,7 +5,6 @@
 #   If your obs differs, adjust unpacking in act().
 # - env provides track_view() with:
 #   - L (track length)
-#   - wrap_s(s)
 #   - sample_center(s) -> dict keys ["x","y","yaw","kappa"] (kappa optional here)
 # - env action: [throttle, steer] both in [-1, 1]
 #
@@ -369,7 +368,7 @@ class CasadiBicycleMPCAgent:
     v_ref = float(self.cfg.v_ref)
 
     s0 = float(progress) * self._L
-    s0 = float(self._tv.wrap_s(s0 + self.cfg.lookahead_s))
+    s0 = float(s0 + self.cfg.lookahead_s)
 
     x_ref = np.zeros(N + 1, dtype=float)
     y_ref = np.zeros(N + 1, dtype=float)
@@ -377,7 +376,7 @@ class CasadiBicycleMPCAgent:
     vx_ref = np.full(N + 1, v_ref, dtype=float)
 
     for k in range(N + 1):
-      sk = float(self._tv.wrap_s(s0 + vx * k * dt))
+      sk = float(s0 + vx * k * dt)
       c = self._tv.sample_center(sk)
       x_ref[k] = float(np.asarray(c["x"]))
       y_ref[k] = float(np.asarray(c["y"]))

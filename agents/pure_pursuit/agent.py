@@ -33,7 +33,7 @@ class PurePursuitAgent:
 
     # progress -> s
     s_now = float(progress) * self._L
-    s_tgt = float(self._tv.wrap_s(s_now + self.cfg.lookahead_m))
+    s_tgt = float(s_now + self.cfg.lookahead_m)
     if getattr(env, "_track_view", None) is not None and getattr(env._track_view, "close", False):
         s_tgt = s_tgt % self._L
     else:

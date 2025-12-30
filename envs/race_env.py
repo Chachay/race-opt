@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 import pandas as pd
+from typing import Callable, Optional, Dict, Any
 
 import gymnasium as gym
 from gymnasium import spaces
@@ -29,15 +30,8 @@ class TrackView:
     self.width_left = width_left
     self.width_right = width_right
 
-  def wrap_s(self, s):
-    s = np.asarray(s)
-    if self.close:
-        return np.mod(s, self.L)
-    # open track: clamp (or raise)
-    return np.clip(s, 0.0, self.L)
-
   def sample_center(self, s_array):
-    s = self.wrap_s(s_array)
+    s = np.asarray(s_array)
     x = self.path.X(s)
     y = self.path.Y(s)
     yaw = self.path.calc_yaw(s)
@@ -144,8 +138,8 @@ class RacingEnvBase(gym.Env):
     # Simple 2d continuous action: [throttle, steer]
     self.action_space = spaces.Box(low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]), dtype=np.float32)
 
-    # Observation: [x, y, vx, vy, progress]
-    high = np.array([np.inf] * 5, dtype=np.float32)
+    # Observation: [x, y, yaw, vx, vy, yaw_rate, progress]
+    high = np.array([np.inf] * 7, dtype=np.float32)
     self.observation_space = spaces.Box(low=-high, high=high, dtype=np.float32)
 
     # internal sim state
@@ -192,6 +186,8 @@ class RacingEnvBase(gym.Env):
     self._episode_start_time = time.time()
     self._last_progress = 0.0
 
+    self._draw_cb = None
+
     obs = self._make_obs(self._state)
     info = self._make_info(self._state)
     info["env_spec"] = self.get_env_spec()
@@ -204,6 +200,10 @@ class RacingEnvBase(gym.Env):
     return obs, info
 
   def step(self, action):
+    prev_t = float(self._t)
+    prev_s = float(self._last_s)
+    prev_progress = float(self._last_progress)
+
     action = np.asarray(action, dtype=np.float32)
     action = np.clip(action, self.action_space.low, self.action_space.high)
     # use the VehicleSimModel self.v for dynamics
@@ -222,7 +222,7 @@ class RacingEnvBase(gym.Env):
     self._state["e_y"] = f["e_y"]
     self._last_s = f["s"]
 
-    reward, fail_event, terminated, truncated, lap_complete = self._make_reward_and_events(self._state, action)
+    reward, fail_event, terminated, truncated, lap_complete, lap_cross_time = self._make_reward_and_events(self._state, action, prev_t=prev_t, prev_s=prev_s, prev_progress=prev_progress)
 
     info = {
       "progress": float(self._state["progress"]),
@@ -234,6 +234,8 @@ class RacingEnvBase(gym.Env):
       "terminated": terminated,
       "truncated": truncated,
     }
+    if lap_cross_time is not None:
+      info["lap_cross_time"] = float(lap_cross_time)
 
     obs = self._make_obs(self._state)
 
@@ -275,22 +277,28 @@ class RacingEnvBase(gym.Env):
       "time": float(self._t),
     }
 
-  def _make_reward_and_events(self, state, action=None):
+  def _make_reward_and_events(self, state, action=None, *, prev_t=None, prev_s=None, prev_progress=None):
     fail_event = None
     lap_complete = False
     terminated = False
     truncated = False
+    lap_cross_time = None
 
     # reward is delta progress since last step, penalize going off track (big dist from path)
     progress = state["progress"]
     delta = progress - self._last_progress
-    if self._track_view.close:
-      # Check for lap completion
-      if delta < 0.0 and progress < 0.1 and self._last_progress > 0.9:
-        lap_complete = True
-      delta = (delta + 1.0) % 1.0
-    elif progress >= 1.0 and self._last_progress < 1.0:
+
+    # Check for lap completion
+    if progress%1.0 < 0.1 and self._last_progress%1.0 > 0.9:
       lap_complete = True
+      if prev_t is not None and prev_s is not None:
+        L = float(self._track_view.L)
+        curr_s = float(self._last_s)
+        denom = (curr_s + L) - float(prev_s)
+        if abs(denom) > 1e-12:
+          alpha = (L - float(prev_s)) / denom
+          alpha = max(0.0, min(1.0, alpha))
+          lap_cross_time = float(prev_t) + alpha * float(self.dt)
 
     reward = delta * 10.0  # scale
 
@@ -306,14 +314,14 @@ class RacingEnvBase(gym.Env):
     if self._t >= self.max_episode_time:
       truncated = True
 
-    # lap detection (progress wrapped around)
+    # lap detection
     if lap_complete:
-      state["lap"] = state.get("lap", 0) + 1
+      state["lap"] = int(progress)
       reward += 100.0
 
     self._last_progress = progress
 
-    return float(reward), fail_event, bool(terminated), bool(truncated), bool(lap_complete)
+    return float(reward), fail_event, bool(terminated), bool(truncated), bool(lap_complete), lap_cross_time
 
   # ---- Recording / streaming ----
   def _record_reset(self, obs, info):
@@ -384,6 +392,15 @@ class RacingEnvBase(gym.Env):
     tel = self._render_telemetry(render_cfg)
     print(f"[RacingEnv] t={tel['time']:.2f} progress={tel['progress']:.3f} pos={[f'{x:.3f}' for x in tel['pos']]} vel={[f'{x:.3f}' for x in tel['vel']]}")
 
+  def set_render_callback(self, cb: Optional[Callable[[Any, Dict[str, Any]], None]]):
+    """
+    Register a drawing callback for debug overlays.
+    cb(ax, ctx) will be called on every render, where:
+      - ax: matplotlib Axes
+      - ctx: {"env": self, "step": int, "state": dict}  (extend as needed)
+    """
+    self._draw_cb = cb
+
   def _render_matplotlib(self, render_cfg=None):
     import matplotlib.pyplot as plt
 
@@ -403,6 +420,14 @@ class RacingEnvBase(gym.Env):
     ax.plot(carX,  carY, "b-")
     ax.plot(self.v.x[0], self.v.x[1], "x")
     ax.set_title("speed[m/s]:{:.2f}, deg:{:.2f}".format(self.v.dq[0], self.v.x[2]))
+
+    ctx = {"env": self, "step": getattr(self, "t", None), "state": getattr(self, "state", None)}
+    if self._draw_cb is not None:
+      try:
+        self._draw_cb(ax, ctx)
+      except Exception as ex:
+        print(f"[render-callback] error: {ex}")
+
     #plt.pause(0.001)
     self._fig.canvas.draw()
     self._fig.canvas.flush_events()

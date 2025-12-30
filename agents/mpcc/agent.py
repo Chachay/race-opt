@@ -39,27 +39,27 @@ class MPCCConfig:
   dt: float = 0.05
 
   # bounds
-  delta_max: float = 0.6
+  delta_max: float = 1.0
   throttle_min: float = -1.0
   throttle_max: float = 1.0
-  sdot_min: float = -3.0
+  sdot_min: float = 0.1
   sdot_max: float = 6.0
 
   # weights
-  w_contour: float = 60.0
-  w_lag: float = 6.0
-  w_epsi: float = 2.0
+  w_contour: float = 50.0
+  w_lag: float = 5.0
+  w_epsi: float = 1.0
   w_vx: float = 0.4
   w_u: float = 0.05
   w_du: float = 1.0
-  w_progress: float = 6.0   # maximize progress => minimize(-w_progress*sdot)
+  w_progress: float = 0.3   # maximize progress => minimize(-w_progress*sdot)
 
   # reference speed shaping (optional)
   vx_ref: float = 5.0
   a_lat_max: float = 3.0     # curvature-based cap
 
   # solver
-  ipopt_max_iter: int = 20
+  ipopt_max_iter: int = 120
   ipopt_tol: float = 1e-3
   warm_start: bool = True
 
@@ -90,6 +90,7 @@ class CasadiMPCC:
     self._z_prev: Optional[np.ndarray] = None
     self._s_center: Optional[np.ndarray] = None  # trust-region center for s states
 
+    self._last_plan: Optional[Dict[str, np.ndarray]] = None
     self._build_solver()
 
   @staticmethod
@@ -119,8 +120,8 @@ class CasadiMPCC:
     U = ca.SX.sym("U", 3, N)      # thr,delta,sdot
 
     # parameters:
-    # x0(7) + track ref per stage: xr,yr,psir,tx,ty,nx,ny,vxr  => 8*(N+1)
-    P = ca.SX.sym("P", 7 + 8 * (N + 1))
+    # x0(7) + track ref per stage: xr,yr,psir,tx,ty,nx,ny,vxr,sr,kappa  => 10*(N+1)
+    P = ca.SX.sym("P", 7 + 10 * (N + 1))
 
     # model params (match sim_model.py)
     m = float(self.p["m"])
@@ -194,28 +195,63 @@ class CasadiMPCC:
     wDU = float(self.cfg.w_du)
     wP = float(self.cfg.w_progress)
 
+    # ------------------------------------------------------------
+    # Soft track boundary (approx) using contouring error eC
+    # Similar intent to nmpc_sim.py inequality:
+    #   (x-a)^2 + (y-b)^2 - R_in^2 <= 0  (distance from center bounded)
+    # Here: penalize violation of |eC| <= w_half - margin
+    # ------------------------------------------------------------
+    w_wall = float(self.p.get("w_wall", 1000.0))
+    w_half = float(self.p.get("track_half_width", min(self.p.get("R_in", 0.14), self.p.get("R_out", 0.14))))
+    margin = float(self.p.get("track_margin", 0.01))
+    eC_lim = max(1e-6, w_half - margin)
+
     for k in range(N):
       xk = X[:, k]
       uk = U[:, k]
       xk1 = X[:, k + 1]
 
-      # ref from P: xr,yr,psir,tx,ty,nx,ny,vxr
-      base = 7 + 8 * k
+      # ref from P: xr,yr,psir,tx,ty,nx,ny,vxr,sr,kappa
+      base = 7 + 10 * k
       xr = P[base + 0]; yr = P[base + 1]; psir = P[base + 2]
       tx = P[base + 3]; ty = P[base + 4]
       nx = P[base + 5]; ny = P[base + 6]
       vxr = P[base + 7]
+      sr = P[base + 8]; kappa = P[base + 9]
 
       # dynamics
       g.append(xk1 - (xk + dt * f(xk, uk)))
 
       # contouring / lag error
-      dx = xk[0] - xr
-      dy = xk[1] - yr
-      eC = dx * nx + dy * ny
-      eL = dx * tx + dy * ty
+      ds = (xk[6] - sr)
+      x_virt = xr + tx * ds
+      y_virt = yr + ty * ds
+      phi_virt = psir + kappa * ds
+
+      sin_phi = ca.sin(phi_virt)
+      cos_phi = ca.cos(phi_virt)
+
+      eC = -sin_phi * (x_virt - xk[0]) + cos_phi * (y_virt - xk[1])
+      eL =  cos_phi * (x_virt - xk[0]) + sin_phi * (y_virt - xk[1])
+
+      vwx = xk[3]*ca.cos(xk[2]) - xk[4]*ca.sin(xk[2])
+      vwy = xk[3]*ca.sin(xk[2]) + xk[4]*ca.cos(xk[2])
+      v_t = vwx*tx + vwy*ty
+
+      w_vtheta = float(self.p.get("w_vtheta", 80.0)) # weight for velocity alignment with track tangent
+      obj += w_vtheta * (uk[2] - v_t) * (uk[2] - v_t)
+
       epsi = self._yaw_err(xk[2] - psir)
       evx = xk[3] - vxr
+
+      # soft boundary on contouring error (start penalizing BEFORE the limit)
+      # ratio = |eC| / eC_lim
+      # penalty activates around ratio > r0 (e.g., 0.85)
+      r0 = float(self.p.get("wall_ratio_start", 0.85))
+      ratio = ca.fabs(eC) / eC_lim
+      # smooth hinge: max(0, ratio - r0)^2
+      slack = ca.fmax(0.0, ratio - r0)
+      obj += w_wall * (slack * slack) * (eC_lim * eC_lim)
 
       obj += wC * (eC * eC) + wL * (eL * eL) + wE * (epsi * epsi) + wV * (evx * evx)
 
@@ -231,18 +267,31 @@ class CasadiMPCC:
         obj += wDU * (duk[0]*duk[0] + duk[1]*duk[1] + 0.2*duk[2]*duk[2])
 
     # terminal cost
-    baseN = 7 + 8 * N
+    baseN = 7 + 10 * N
     xrN = P[baseN + 0]; yrN = P[baseN + 1]; psirN = P[baseN + 2]
     txN = P[baseN + 3]; tyN = P[baseN + 4]
     nxN = P[baseN + 5]; nyN = P[baseN + 6]
     vxrN = P[baseN + 7]
+    srN = P[baseN + 8]; kappaN = P[baseN + 9]
 
-    dxN = X[0, N] - xrN
-    dyN = X[1, N] - yrN
-    eCN = dxN * nxN + dyN * nyN
-    eLN = dxN * txN + dyN * tyN
+    dsN = (X[6, N] - srN)
+    x_virtN = xrN + txN * dsN
+    y_virtN = yrN + tyN * dsN
+    phi_virtN = psirN + kappaN * dsN
+    sin_phiN = ca.sin(phi_virtN)
+    cos_phiN = ca.cos(phi_virtN)
+
+    eCN = -sin_phiN * (x_virtN - X[0, N]) + cos_phiN * (y_virtN - X[1, N])
+    eLN =  cos_phiN * (x_virtN - X[0, N]) + sin_phiN * (y_virtN - X[1, N])
     epsiN = self._yaw_err(X[2, N] - psirN)
     evxN = X[3, N] - vxrN
+
+    # terminal soft boundary
+    r0 = float(self.p.get("wall_ratio_start", 0.85))
+    ratioN = ca.fabs(eCN) / eC_lim
+    slackN = ca.fmax(0.0, ratioN - r0)
+    obj += w_wall * (slackN * slackN) * (eC_lim * eC_lim)
+
     obj += wC*(eCN*eCN) + wL*(eLN*eLN) + wE*(epsiN*epsiN) + wV*(evxN*evxN)
 
     g = ca.vertcat(*g)  # size: 7 + 7N
@@ -266,6 +315,7 @@ class CasadiMPCC:
     # vx >= 0
     for k in range(N + 1):
       lbz[7 * k + 3] = 0.0
+      #lbz[7 * k + 3] = vx_zero
 
     # input bounds
     nX = self._nX
@@ -296,14 +346,14 @@ class CasadiMPCC:
 
   def _pack_P(self, x0: np.ndarray, s_seq: np.ndarray) -> np.ndarray:
     N = self.cfg.N
-    P = np.zeros(7 + 8 * (N + 1), dtype=float)
+    P = np.zeros(7 + 10 * (N + 1), dtype=float)
     P[0:7] = x0
 
     # sample_center returns tx,ty,nx,ny in your env :contentReference[oaicite:7]{index=7}
     c = self.tv.sample_center(s_seq)
     xr = np.asarray(c["x"], dtype=float).reshape(-1)
     yr = np.asarray(c["y"], dtype=float).reshape(-1)
-    psir = np.asarray(c["yaw"], dtype=float).reshape(-1)
+    psir = np.unwrap(np.asarray(c["yaw"], dtype=float).reshape(-1))
     tx = np.asarray(c["tx"], dtype=float).reshape(-1)
     ty = np.asarray(c["ty"], dtype=float).reshape(-1)
     nx = np.asarray(c["nx"], dtype=float).reshape(-1)
@@ -313,7 +363,7 @@ class CasadiMPCC:
     vxr = np.array([self._vx_ref_from_curvature(kappa[i]) for i in range(N + 1)], dtype=float)
 
     for k in range(N + 1):
-      base = 7 + 8 * k
+      base = 7 + 10 * k
       P[base + 0] = xr[k]
       P[base + 1] = yr[k]
       P[base + 2] = psir[k]
@@ -322,6 +372,8 @@ class CasadiMPCC:
       P[base + 5] = nx[k]
       P[base + 6] = ny[k]
       P[base + 7] = vxr[k]
+      P[base + 8] = s_seq[k]
+      P[base + 9] = kappa[k]
 
     return P
 
@@ -332,22 +384,27 @@ class CasadiMPCC:
     """
     N = self.cfg.N
     dt = float(self.cfg.dt)
-    tr = float(self.p.get("s_trust_region", 0.2))
+    tr = float(self.p.get("s_trust_region", 0.1))
+    v_min_ref = float(self.p.get("v_min_ref", 0.3))
+
+    x0 = x0.copy()
+    x0[3] = max(x0[3], 0.3) #vx_zero)  # vx >= vx_zero
 
     s0 = float(x0[6])
+    v_adv = max(float(x0[3]), v_min_ref, 0.1)
 
     if self._s_center is None:
       # init guess: forward using current vx
       v0 = max(float(x0[3]), float(self.p["vx_zero"]))
-      s_seq = np.array([s0 + v0 * k * dt for k in range(N + 1)], dtype=float)
+      s_seq = np.array([s0 + v_adv * k * dt for k in range(N + 1)], dtype=float)
     else:
       # shift previous center
       s_seq = self._s_center.copy()
       s_seq[:-1] = s_seq[1:]
-      s_seq[-1] = s_seq[-2] + max(float(x0[3]), float(self.p["vx_zero"])) * dt
+      #s_seq[-1] = s_seq[-2] + max(float(x0[3]), float(self.p["vx_zero"])) * dt
+      s_seq[-1] = s_seq[-2] + v_adv * dt
 
     # wrap for sampling
-    s_seq = np.asarray(self.tv.wrap_s(s_seq), dtype=float)
     P = self._pack_P(x0, s_seq)
 
     # trust region bounds for s states
@@ -368,20 +425,83 @@ class CasadiMPCC:
     iters = int(stats.get("iter_count", 0))
     ok = ("Solve_Succeeded" in status) or ("Solved" in status)
     if not ok:
-      return np.array([0.0, 0.0, 0.0], dtype=float), {"ok": False, "status": status, "iters": iters}
+      self._z_prev = None
+      self._s_center = None
+
+      if hasattr(self, "_u_prev") and (self._u_prev is not None):
+        return self._u_prev.copy(), {"ok": False, "status": status, "iters": iters, "reset": True}
+
+      return np.array([0.0, 0.0, 0.0], dtype=float), {"ok": False, "status": status, "iters": iters, "reset": True}
 
     z = np.array(sol["x"]).reshape(-1)
     self._z_prev = z.copy()
 
     # update center using predicted s from solution
     s_pred = np.array([z[7 * k + 6] for k in range(N + 1)], dtype=float)
-    self._s_center = np.asarray(self.tv.wrap_s(s_pred), dtype=float)
+    self._s_center = np.asarray(s_pred, dtype=float)
 
     # first control
     nX = self._nX
     thr0 = float(z[nX + 0])
     del0 = float(z[nX + 1])
     sdot0 = float(z[nX + 2])
+
+    # --- DEBUG LOG (k=0) -------------------------------------------------
+    # Print: eC, eL, delta0, sdot0, vx  (for diagnosing early-turn / off-track)
+    if bool(self.p.get("debug_mpcc", False)):
+      try:
+        # Predicted state at k=0 from solution z
+        x0_sol = float(z[0])
+        y0_sol = float(z[1])
+        psi0_sol = float(z[2])
+        vx0_sol = float(z[3])
+        vy0_sol = float(z[4])
+        r0_sol  = float(z[5])
+        s0_sol  = float(z[6])
+
+        # Track reference at s0
+        c0 = self.tv.sample_center(np.array([s0_sol], dtype=float))
+        xr = float(np.asarray(c0["x"]).reshape(-1)[0])
+        yr = float(np.asarray(c0["y"]).reshape(-1)[0])
+        psir = float(np.asarray(c0["yaw"]).reshape(-1)[0])
+        tx = float(np.asarray(c0["tx"]).reshape(-1)[0])
+        ty = float(np.asarray(c0["ty"]).reshape(-1)[0])
+        nx = float(np.asarray(c0["nx"]).reshape(-1)[0])
+        ny = float(np.asarray(c0["ny"]).reshape(-1)[0])
+        kappa = float(np.asarray(c0.get("kappa", 0.0)).reshape(-1)[0])
+
+        sr = s0_sol
+        ds = (s0_sol - sr)  # = 0.0
+
+        x_virt = xr + tx * ds
+        y_virt = yr + ty * ds
+        phi_virt = psir + kappa * ds
+
+        sin_phi = math.sin(phi_virt)
+        cos_phi = math.cos(phi_virt)
+
+        eC0 = -sin_phi * (x_virt - x0_sol) + cos_phi * (y_virt - y0_sol)
+        eL0 =  cos_phi * (x_virt - x0_sol) + sin_phi * (y_virt - y0_sol)
+
+        print(
+          f"[MPCC k0] eC={eC0:+.4f} eL={eL0:+.4f} "
+          f"delta0={del0:+.4f} sdot0={sdot0:+.3f} vx={vx0_sol:+.3f}"
+        )
+        print(f"[SOLVE] u0=({thr0:+.4f},{del0:+.4f},{sdot0:+.4f}) ok={ok} status={status} iters={iters}")
+      except Exception as ex:
+        print(f"[MPCC k0] debug failed: {ex}")
+    # ---------------------------------------------------------------------
+    Xflat = z[: self._nX]
+    X = Xflat.reshape((7, N + 1), order="F")
+    plan = {
+        "x": X[0, 1:].copy(),
+        "y": X[1, 1:].copy(),
+    }
+    self._last_plan = plan
+
+    u0 = np.array([thr0, del0, sdot0], dtype=float)
+    self._u_prev = u0.copy()
+
     return np.array([thr0, del0, sdot0], dtype=float), {"ok": True, "status": status, "iters": iters, "s_pred": s_pred}
 
 class CasadiMPCCAgent:
@@ -399,6 +519,18 @@ class CasadiMPCCAgent:
     self._L = float(self._tv.L)
     self._mpcc = CasadiMPCC(self.params, self.cfg, self._tv)
 
+    def _draw_overlay(ax, ctx: Dict[str, Any]):
+      plan = getattr(self._mpcc, "_last_plan", None)
+      if not plan:
+        return
+      x = np.asarray(plan["x"])
+      y = np.asarray(plan["y"])
+      ax.plot(x, y, "g-", linewidth=2)
+      #ax.plot(x, y, "o", markersize=3)
+
+    if hasattr(env, "set_render_callback"):
+      env.set_render_callback(_draw_overlay)
+
   def act(self, env, obs: np.ndarray, info: Dict[str, Any]) -> np.ndarray:
     if self._mpcc is None:
       self.reset(env, obs, info)
@@ -407,8 +539,7 @@ class CasadiMPCCAgent:
     x, y, yaw, vx, vy, rr, progress = map(float, obs)
 
     # initial s from progress
-    s0 = float(progress) * self._L
-    s0 = float(self._tv.wrap_s(s0))
+    s0 = progress * self._L
 
     x0 = np.array([x, y, yaw, vx, vy, rr, s0], dtype=float)
     u0, diag = self._mpcc.solve(x0)
@@ -420,7 +551,6 @@ class CasadiMPCCAgent:
     return np.array([thr, steer], dtype=np.float32)
 
 if __name__ == "__main__":
-  # quick smoke run (same style as your agent.py main)
   import sys
   REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
   if REPO_ROOT not in sys.path:
@@ -432,7 +562,7 @@ if __name__ == "__main__":
   agent = CasadiMPCCAgent(None, MPCCConfig(N=20, dt=0.05))
 
   metrics = run_episode(env, agent, RunConfig(
-    max_steps=3000,
+    max_steps=5000,
     max_laps=3,
     render="matplotlib",
     seed=0,

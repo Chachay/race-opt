@@ -32,11 +32,13 @@ This repository currently includes:
 
 ## Implemented agents
 
-| # | Algorithm | Lap time |
-| -|-|-|
-| 1 | Pure pursuite | 11.80 s |
-| 2 | Minimal MPC(LQR) | 14.15 s |
-| 3 | CasADi MPC | 11.05 s |
+| # | Algorithm | Lap time | Note |
+| -|-|-| - |
+| 1 | Pure pursuite | 11.75 s | agents/pure_pursuit |
+| 2 | Minimal MPC(LQR) | 14.15 s | agents/mpc_lqr |
+| 3 | CasADi MPC | 11.05 s | agents/mpc_casadi |
+| 4 | CasADi MPCC | 10.23 s | agents/mpcc |
+| * | GP-augmented MPCC | 9.61 s | (L. Hewig, et al. 2020) with a noisy sensor environment |
 
 ## Lineage and Acknowledgements
 race-opt is heavily inspired by the pioneering work of Alexander Liniger(@alexliniger) to the gym-racecar project.

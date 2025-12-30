@@ -27,15 +27,19 @@ def main():
   ap.add_argument("--render", type=str, default="matplotlib",
                   choices=["none", "human", "matplotlib", "rgb_array", "telemetry"])
   ap.add_argument("--sleep", type=float, default=0.0, help="wall-clock sleep per step (sec)")
-  ap.add_argument("--lookahead", type=float, default=0.2)
-  ap.add_argument("--target-speed", type=float, default=1.5)
+  ap.add_argument("--lookahead", type=float, default=0.433)
+  ap.add_argument("--steer-gain", type=float, default=1.19)
+  ap.add_argument("--target-speed", type=float, default=1.85)
+  ap.add_argument("--speed-kp", type=float, default=0.86)
   ap.add_argument("--seed", type=int, default=0)
   args = ap.parse_args()
 
   env = RacingEnvBase()
   agent = PurePursuitAgent(PurePursuitConfig(
     lookahead_m=float(args.lookahead),
+    steer_gain=float(args.steer_gain),
     target_speed=float(args.target_speed),
+    speed_kp=float(args.speed_kp),
   ))
 
   metrics = run_episode(env, agent, RunConfig(

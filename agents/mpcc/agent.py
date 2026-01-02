@@ -39,27 +39,27 @@ class MPCCConfig:
   dt: float = 0.05
 
   # bounds
-  delta_max: float = 0.6
+  delta_max: float = 1.0
   throttle_min: float = -1.0
   throttle_max: float = 1.0
-  sdot_min: float = 1.0
+  sdot_min: float = 0.1
   sdot_max: float = 6.0
 
   # weights
-  w_contour: float = 60.0
-  w_lag: float = 6.0
-  w_epsi: float = 2.0
+  w_contour: float = 50.0
+  w_lag: float = 5.0
+  w_epsi: float = 1.0
   w_vx: float = 0.4
   w_u: float = 0.05
   w_du: float = 1.0
-  w_progress: float = 6.0   # maximize progress => minimize(-w_progress*sdot)
+  w_progress: float = 0.3   # maximize progress => minimize(-w_progress*sdot)
 
   # reference speed shaping (optional)
   vx_ref: float = 5.0
   a_lat_max: float = 3.0     # curvature-based cap
 
   # solver
-  ipopt_max_iter: int = 20
+  ipopt_max_iter: int = 120
   ipopt_tol: float = 1e-3
   warm_start: bool = True
 
@@ -194,6 +194,17 @@ class CasadiMPCC:
     wDU = float(self.cfg.w_du)
     wP = float(self.cfg.w_progress)
 
+    # ------------------------------------------------------------
+    # Soft track boundary (approx) using contouring error eC
+    # Similar intent to nmpc_sim.py inequality:
+    #   (x-a)^2 + (y-b)^2 - R_in^2 <= 0  (distance from center bounded)
+    # Here: penalize violation of |eC| <= w_half - margin
+    # ------------------------------------------------------------
+    w_wall = float(self.p.get("w_wall", 1000.0))
+    w_half = float(self.p.get("track_half_width", min(self.p.get("R_in", 0.14), self.p.get("R_out", 0.14))))
+    margin = float(self.p.get("track_margin", 0.01))
+    eC_lim = max(1e-6, w_half - margin)
+
     for k in range(N):
       xk = X[:, k]
       uk = U[:, k]
@@ -222,8 +233,24 @@ class CasadiMPCC:
       eC = -sin_phi * (x_virt - xk[0]) + cos_phi * (y_virt - xk[1])
       eL =  cos_phi * (x_virt - xk[0]) + sin_phi * (y_virt - xk[1])
 
+      vwx = xk[3]*ca.cos(xk[2]) - xk[4]*ca.sin(xk[2])
+      vwy = xk[3]*ca.sin(xk[2]) + xk[4]*ca.cos(xk[2])
+      v_t = vwx*tx + vwy*ty
+
+      w_vtheta = float(self.p.get("w_vtheta", 80.0)) # weight for velocity alignment with track tangent
+      obj += w_vtheta * (uk[2] - v_t) * (uk[2] - v_t)
+
       epsi = self._yaw_err(xk[2] - psir)
       evx = xk[3] - vxr
+
+      # soft boundary on contouring error (start penalizing BEFORE the limit)
+      # ratio = |eC| / eC_lim
+      # penalty activates around ratio > r0 (e.g., 0.85)
+      r0 = float(self.p.get("wall_ratio_start", 0.85))
+      ratio = ca.fabs(eC) / eC_lim
+      # smooth hinge: max(0, ratio - r0)^2
+      slack = ca.fmax(0.0, ratio - r0)
+      obj += w_wall * (slack * slack) * (eC_lim * eC_lim)
 
       obj += wC * (eC * eC) + wL * (eL * eL) + wE * (epsi * epsi) + wV * (evx * evx)
 
@@ -257,6 +284,13 @@ class CasadiMPCC:
     eLN =  cos_phiN * (x_virtN - X[0, N]) + sin_phiN * (y_virtN - X[1, N])
     epsiN = self._yaw_err(X[2, N] - psirN)
     evxN = X[3, N] - vxrN
+
+    # terminal soft boundary
+    r0 = float(self.p.get("wall_ratio_start", 0.85))
+    ratioN = ca.fabs(eCN) / eC_lim
+    slackN = ca.fmax(0.0, ratioN - r0)
+    obj += w_wall * (slackN * slackN) * (eC_lim * eC_lim)
+
     obj += wC*(eCN*eCN) + wL*(eLN*eLN) + wE*(epsiN*epsiN) + wV*(evxN*evxN)
 
     g = ca.vertcat(*g)  # size: 7 + 7N
@@ -279,8 +313,8 @@ class CasadiMPCC:
 
     # vx >= 0
     for k in range(N + 1):
-      #lbz[7 * k + 3] = 0.0
-      lbz[7 * k + 3] = vx_zero
+      lbz[7 * k + 3] = 0.0
+      #lbz[7 * k + 3] = vx_zero
 
     # input bounds
     nX = self._nX
@@ -349,22 +383,25 @@ class CasadiMPCC:
     """
     N = self.cfg.N
     dt = float(self.cfg.dt)
-    tr = float(self.p.get("s_trust_region", 0.2))
+    tr = float(self.p.get("s_trust_region", 0.1))
+    v_min_ref = float(self.p.get("v_min_ref", 0.3))
 
     x0 = x0.copy()
     x0[3] = max(x0[3], 0.3) #vx_zero)  # vx >= vx_zero
 
     s0 = float(x0[6])
+    v_adv = max(float(x0[3]), v_min_ref, 0.1)
 
     if self._s_center is None:
       # init guess: forward using current vx
       v0 = max(float(x0[3]), float(self.p["vx_zero"]))
-      s_seq = np.array([s0 + v0 * k * dt for k in range(N + 1)], dtype=float)
+      s_seq = np.array([s0 + v_adv * k * dt for k in range(N + 1)], dtype=float)
     else:
       # shift previous center
       s_seq = self._s_center.copy()
       s_seq[:-1] = s_seq[1:]
-      s_seq[-1] = s_seq[-2] + max(float(x0[3]), float(self.p["vx_zero"])) * dt
+      #s_seq[-1] = s_seq[-2] + max(float(x0[3]), float(self.p["vx_zero"])) * dt
+      s_seq[-1] = s_seq[-2] + v_adv * dt
 
     # wrap for sampling
     s_seq = np.asarray(self.tv.wrap_s(s_seq), dtype=float)
@@ -402,6 +439,58 @@ class CasadiMPCC:
     thr0 = float(z[nX + 0])
     del0 = float(z[nX + 1])
     sdot0 = float(z[nX + 2])
+
+    # --- DEBUG LOG (k=0) -------------------------------------------------
+    # Print: eC, eL, delta0, sdot0, vx  (for diagnosing early-turn / off-track)
+    if bool(self.p.get("debug_mpcc", False)):
+      try:
+        # Extract predicted state at k=0 from solution z
+        x0_sol = float(z[0])
+        y0_sol = float(z[1])
+        psi0_sol = float(z[2])
+        vx0_sol = float(z[3])
+        vy0_sol = float(z[4])
+        r0_sol  = float(z[5])
+        s0_sol  = float(z[6])
+
+        # Extract first control
+        thr0 = float(z[nX + 0])
+        del0 = float(z[nX + 1])
+        sdot0 = float(z[nX + 2])
+
+        # Track reference at s0
+        s0_wrapped = float(self.tv.wrap_s(s0_sol))
+        c0 = self.tv.sample_center(np.array([s0_wrapped], dtype=float))
+        xr = float(np.asarray(c0["x"]).reshape(-1)[0])
+        yr = float(np.asarray(c0["y"]).reshape(-1)[0])
+        psir = float(np.asarray(c0["yaw"]).reshape(-1)[0])
+        tx = float(np.asarray(c0["tx"]).reshape(-1)[0])
+        ty = float(np.asarray(c0["ty"]).reshape(-1)[0])
+        nx = float(np.asarray(c0["nx"]).reshape(-1)[0])
+        ny = float(np.asarray(c0["ny"]).reshape(-1)[0])
+        kappa = float(np.asarray(c0.get("kappa", 0.0)).reshape(-1)[0])
+
+        sr = s0_wrapped
+        ds = (s0_wrapped - sr)  # = 0.0
+
+        x_virt = xr + tx * ds
+        y_virt = yr + ty * ds
+        phi_virt = psir + kappa * ds
+
+        sin_phi = math.sin(phi_virt)
+        cos_phi = math.cos(phi_virt)
+
+        eC0 = -sin_phi * (x_virt - x0_sol) + cos_phi * (y_virt - y0_sol)
+        eL0 =  cos_phi * (x_virt - x0_sol) + sin_phi * (y_virt - y0_sol)
+
+        print(
+          f"[MPCC k0] eC={eC0:+.4f} eL={eL0:+.4f} "
+          f"delta0={del0:+.4f} sdot0={sdot0:+.3f} vx={vx0_sol:+.3f}"
+        )
+      except Exception as ex:
+        print(f"[MPCC k0] debug failed: {ex}")
+    # ---------------------------------------------------------------------
+
     return np.array([thr0, del0, sdot0], dtype=float), {"ok": True, "status": status, "iters": iters, "s_pred": s_pred}
 
 class CasadiMPCCAgent:

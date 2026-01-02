@@ -42,7 +42,7 @@ class MPCCConfig:
   delta_max: float = 0.6
   throttle_min: float = -1.0
   throttle_max: float = 1.0
-  sdot_min: float = 0.0
+  sdot_min: float = 1.0
   sdot_max: float = 6.0
 
   # weights
@@ -119,8 +119,8 @@ class CasadiMPCC:
     U = ca.SX.sym("U", 3, N)      # thr,delta,sdot
 
     # parameters:
-    # x0(7) + track ref per stage: xr,yr,psir,tx,ty,nx,ny,vxr  => 8*(N+1)
-    P = ca.SX.sym("P", 7 + 8 * (N + 1))
+    # x0(7) + track ref per stage: xr,yr,psir,tx,ty,nx,ny,vxr,sr,kappa  => 10*(N+1)
+    P = ca.SX.sym("P", 7 + 10 * (N + 1))
 
     # model params (match sim_model.py)
     m = float(self.p["m"])
@@ -199,21 +199,29 @@ class CasadiMPCC:
       uk = U[:, k]
       xk1 = X[:, k + 1]
 
-      # ref from P: xr,yr,psir,tx,ty,nx,ny,vxr
-      base = 7 + 8 * k
+      # ref from P: xr,yr,psir,tx,ty,nx,ny,vxr,sr,kappa
+      base = 7 + 10 * k
       xr = P[base + 0]; yr = P[base + 1]; psir = P[base + 2]
       tx = P[base + 3]; ty = P[base + 4]
       nx = P[base + 5]; ny = P[base + 6]
       vxr = P[base + 7]
+      sr = P[base + 8]; kappa = P[base + 9]
 
       # dynamics
       g.append(xk1 - (xk + dt * f(xk, uk)))
 
       # contouring / lag error
-      dx = xk[0] - xr
-      dy = xk[1] - yr
-      eC = dx * nx + dy * ny
-      eL = dx * tx + dy * ty
+      ds = (xk[6] - sr)
+      x_virt = xr + tx * ds
+      y_virt = yr + ty * ds
+      phi_virt = psir + kappa * ds
+
+      sin_phi = ca.sin(phi_virt)
+      cos_phi = ca.cos(phi_virt)
+
+      eC = -sin_phi * (x_virt - xk[0]) + cos_phi * (y_virt - xk[1])
+      eL =  cos_phi * (x_virt - xk[0]) + sin_phi * (y_virt - xk[1])
+
       epsi = self._yaw_err(xk[2] - psir)
       evx = xk[3] - vxr
 
@@ -231,16 +239,22 @@ class CasadiMPCC:
         obj += wDU * (duk[0]*duk[0] + duk[1]*duk[1] + 0.2*duk[2]*duk[2])
 
     # terminal cost
-    baseN = 7 + 8 * N
+    baseN = 7 + 10 * N
     xrN = P[baseN + 0]; yrN = P[baseN + 1]; psirN = P[baseN + 2]
     txN = P[baseN + 3]; tyN = P[baseN + 4]
     nxN = P[baseN + 5]; nyN = P[baseN + 6]
     vxrN = P[baseN + 7]
+    srN = P[baseN + 8]; kappaN = P[baseN + 9]
 
-    dxN = X[0, N] - xrN
-    dyN = X[1, N] - yrN
-    eCN = dxN * nxN + dyN * nyN
-    eLN = dxN * txN + dyN * tyN
+    dsN = (X[6, N] - srN)
+    x_virtN = xrN + txN * dsN
+    y_virtN = yrN + tyN * dsN
+    phi_virtN = psirN + kappaN * dsN
+    sin_phiN = ca.sin(phi_virtN)
+    cos_phiN = ca.cos(phi_virtN)
+
+    eCN = -sin_phiN * (x_virtN - X[0, N]) + cos_phiN * (y_virtN - X[1, N])
+    eLN =  cos_phiN * (x_virtN - X[0, N]) + sin_phiN * (y_virtN - X[1, N])
     epsiN = self._yaw_err(X[2, N] - psirN)
     evxN = X[3, N] - vxrN
     obj += wC*(eCN*eCN) + wL*(eLN*eLN) + wE*(epsiN*epsiN) + wV*(evxN*evxN)
@@ -297,7 +311,7 @@ class CasadiMPCC:
 
   def _pack_P(self, x0: np.ndarray, s_seq: np.ndarray) -> np.ndarray:
     N = self.cfg.N
-    P = np.zeros(7 + 8 * (N + 1), dtype=float)
+    P = np.zeros(7 + 10 * (N + 1), dtype=float)
     P[0:7] = x0
 
     # sample_center returns tx,ty,nx,ny in your env :contentReference[oaicite:7]{index=7}
@@ -314,7 +328,7 @@ class CasadiMPCC:
     vxr = np.array([self._vx_ref_from_curvature(kappa[i]) for i in range(N + 1)], dtype=float)
 
     for k in range(N + 1):
-      base = 7 + 8 * k
+      base = 7 + 10 * k
       P[base + 0] = xr[k]
       P[base + 1] = yr[k]
       P[base + 2] = psir[k]
@@ -323,6 +337,8 @@ class CasadiMPCC:
       P[base + 5] = nx[k]
       P[base + 6] = ny[k]
       P[base + 7] = vxr[k]
+      P[base + 8] = s_seq[k]
+      P[base + 9] = kappa[k]
 
     return P
 
@@ -333,7 +349,7 @@ class CasadiMPCC:
     """
     N = self.cfg.N
     dt = float(self.cfg.dt)
-    tr = float(self.p.get("s_trust_region", 0.1))
+    tr = float(self.p.get("s_trust_region", 0.2))
 
     x0 = x0.copy()
     x0[3] = max(x0[3], 0.3) #vx_zero)  # vx >= vx_zero
@@ -424,7 +440,6 @@ class CasadiMPCCAgent:
     return np.array([thr, steer], dtype=np.float32)
 
 if __name__ == "__main__":
-  # quick smoke run (same style as your agent.py main)
   import sys
   REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
   if REPO_ROOT not in sys.path:

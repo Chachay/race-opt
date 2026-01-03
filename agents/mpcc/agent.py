@@ -90,6 +90,7 @@ class CasadiMPCC:
     self._z_prev: Optional[np.ndarray] = None
     self._s_center: Optional[np.ndarray] = None  # trust-region center for s states
 
+    self._last_plan: Optional[Dict[str, np.ndarray]] = None
     self._build_solver()
 
   @staticmethod
@@ -404,8 +405,8 @@ class CasadiMPCC:
       s_seq[-1] = s_seq[-2] + v_adv * dt
 
     # wrap for sampling
-    s_seq = np.asarray(self.tv.wrap_s(s_seq), dtype=float)
-    P = self._pack_P(x0, s_seq)
+    s_seq_wrapped = np.asarray(self.tv.wrap_s(s_seq), dtype=float)
+    P = self._pack_P(x0, s_seq_wrapped)
 
     # trust region bounds for s states
     lbz = self._lbz.copy()
@@ -490,6 +491,13 @@ class CasadiMPCC:
       except Exception as ex:
         print(f"[MPCC k0] debug failed: {ex}")
     # ---------------------------------------------------------------------
+    Xflat = z[: self._nX]
+    X = Xflat.reshape((7, N + 1), order="F")
+    plan = {
+        "x": X[0, :].copy(),
+        "y": X[1, :].copy(),
+    }
+    self._last_plan = plan
 
     return np.array([thr0, del0, sdot0], dtype=float), {"ok": True, "status": status, "iters": iters, "s_pred": s_pred}
 
@@ -507,6 +515,18 @@ class CasadiMPCCAgent:
     self._tv = env.track_view()
     self._L = float(self._tv.L)
     self._mpcc = CasadiMPCC(self.params, self.cfg, self._tv)
+
+    def _draw_overlay(ax, ctx: Dict[str, Any]):
+      plan = getattr(self._mpcc, "_last_plan", None)
+      if not plan:
+        return
+      x = np.asarray(plan["x"])
+      y = np.asarray(plan["y"])
+      ax.plot(x, y, "g-", linewidth=2)
+      #ax.plot(x, y, "o", markersize=3)
+
+    if hasattr(env, "set_render_callback"):
+      env.set_render_callback(_draw_overlay)
 
   def act(self, env, obs: np.ndarray, info: Dict[str, Any]) -> np.ndarray:
     if self._mpcc is None:

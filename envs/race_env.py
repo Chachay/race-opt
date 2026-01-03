@@ -194,6 +194,8 @@ class RacingEnvBase(gym.Env):
     self._episode_start_time = time.time()
     self._last_progress = 0.0
 
+    self._draw_cb = None
+
     obs = self._make_obs(self._state)
     info = self._make_info(self._state)
     info["env_spec"] = self.get_env_spec()

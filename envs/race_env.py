@@ -61,10 +61,6 @@ class TrackView:
     # uses your optimizer; returns s* (scalar)
     ret = self.path.find_nearest_point(s, x, y)
     s_proj = float(ret[0][0])
-    if self.close:
-        s_proj = float(np.mod(s_proj, self.L))
-    else:
-        s_proj = float(np.clip(s_proj, 0.0, self.L))
     return s_proj
 
   def frenet_errors(self, x, y, yaw_vehicle, s):
